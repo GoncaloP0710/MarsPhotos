@@ -17,6 +17,8 @@ package com.example.marsphotos.ui.screens
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Environment
 import android.util.Log
@@ -52,6 +54,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 
@@ -72,10 +75,13 @@ import com.google.firebase.database.MutableData
 import com.google.firebase.database.Transaction
 import com.google.firebase.database.ValueEventListener
 import com.google.firebase.storage.FirebaseStorage
+import com.google.firebase.storage.StorageReference
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Locale
 import java.util.Objects
 
 @Composable
@@ -481,12 +487,41 @@ fun CameraCompose(modifier: Modifier = Modifier, db: FirebaseDatabase, onImageCa
         context.packageName + ".provider", file
     )
     var capturedImageUri by remember { mutableStateOf<Uri>(Uri.EMPTY) }
+
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) {
         if (it) {
             capturedImageUri = uri
             onImageCaptured(uri)
             // Log the URI to verify it
             Log.d("CameraCompose", "URI: $uri")
+            saveImageAsJpg(context, uri) // Save the image as a real file
+
+            // TODO - Add image to firebase
+            // Upload the image to Firebase Storage
+            val storageReference = FirebaseStorage.getInstance().reference.child("Photos/${uri.lastPathSegment}")
+
+            storageReference.putFile(uri)
+                .addOnSuccessListener { taskSnapshot ->
+                    // Image uploaded successfully
+                    Log.d("CameraCompose", "Image uploaded successfully")
+
+                    // Get the download URL after successful upload
+                    storageReference.downloadUrl.addOnSuccessListener { downloadUri ->
+                        // Save the download URL in Firebase Realtime Database
+                        val imageRef = db.reference.child("Photos")
+                        imageRef.push().setValue(downloadUri.toString())
+                            .addOnSuccessListener {
+                                Log.d("CameraCompose", "Download URL saved to Realtime Database")
+                            }
+                            .addOnFailureListener { exception ->
+                                Log.e("CameraCompose", "Failed to save download URL: ${exception.message}")
+                            }
+                    }
+                }
+                .addOnFailureListener { exception ->
+                    // Handle any errors during upload
+                    Log.e("CameraCompose", "Image upload failed: ${exception.message}")
+                }
         }
     }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -506,43 +541,29 @@ fun CameraCompose(modifier: Modifier = Modifier, db: FirebaseDatabase, onImageCa
     }
 }
 
-fun uploadImageToFirebase(context: Context, uri: Uri, db: FirebaseDatabase) {
-    val MESSAGES_CHILD = "camera"
-    val imagesRef = db.reference.child(MESSAGES_CHILD)
-
-    // Log the URI to verify it
-    Log.d("UploadImage", "URI: $uri")
-
-    // Step 1: Get a reference to Firebase Storage
-    val storage = FirebaseStorage.getInstance()
-    val storageRef = storage.reference.child("images/${System.currentTimeMillis()}.jpg") // Unique filename
-
-    // Step 2: Convert URI to InputStream and Upload
-    val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-    if (inputStream == null) {
-        Log.e("UploadImage", "Input stream is null. Check the URI.")
-        return
-    }
-
-    // Upload the image to Firebase Storage
-    val uploadTask = storageRef.putStream(inputStream)
-    uploadTask.addOnSuccessListener { taskSnapshot ->
-        // Get the download URL after the upload is complete
-        storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
-            // Step 3: Store the download URL in Firebase Realtime Database
-            imagesRef.push().setValue(downloadUri.toString())
-                .addOnCompleteListener { task ->
-                    if (task.isSuccessful) {
-                        Log.d("FirebaseUpload", "Image uploaded successfully and URL saved.")
-                    } else {
-                        Log.e("FirebaseUpload", "Failed to save URL: ${task.exception?.message}")
-                    }
-                }
-        }.addOnFailureListener { e ->
-            Log.e("FirebaseUpload", "Failed to get download URL: ${e.message}")
+fun saveImageAsJpg(context: Context, uri: Uri) {
+    try {
+        // Define the output directory (Photos folder in app-specific storage)
+        val photosDir = File(context.filesDir, "Photos")
+        if (!photosDir.exists()) {
+            photosDir.mkdirs()  // Create the directory if it doesn't exist
         }
-    }.addOnFailureListener { e ->
-        Log.e("FirebaseUpload", "Upload failed: ${e.message}")
+
+        // Create the file in the Photos directory
+        val outputFile = File(photosDir, "JPEG_${System.currentTimeMillis()}.jpg")
+
+        context.contentResolver.openInputStream(uri)?.use { inputStream ->
+            val bitmap = BitmapFactory.decodeStream(inputStream)
+            if (bitmap != null) {
+                FileOutputStream(outputFile).use { outputStream ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
+                }
+                Log.d("CameraCompose", "Image saved to: ${outputFile.absolutePath}")
+            } else {
+                Log.e("CameraCompose", "Failed to decode input stream into Bitmap.")
+            }
+        }
+    } catch (e: Exception) {
+        Log.e("CameraCompose", "Failed to save image", e)
     }
 }
-
