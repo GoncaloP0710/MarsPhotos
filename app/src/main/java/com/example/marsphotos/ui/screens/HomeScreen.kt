@@ -15,6 +15,13 @@
  */
 package com.example.marsphotos.ui.screens
 
+import android.content.Context
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Environment
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +35,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,6 +52,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 
 import com.example.marsphotos.ui.theme.MarsPhotosTheme
 
@@ -61,6 +71,12 @@ import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.MutableData
 import com.google.firebase.database.Transaction
 import com.google.firebase.database.ValueEventListener
+import com.google.firebase.storage.FirebaseStorage
+import java.io.File
+import java.io.InputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Objects
 
 @Composable
 fun HomeScreen(
@@ -174,7 +190,7 @@ fun ResultScreen(photos: String, randomPhoto: MarsPhoto, modifier: Modifier = Mo
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f) // Use available space for the image
+                .weight(3f) // Use available space for the image
         ) {
             AsyncImage(
                 model = ImageRequest.Builder(LocalContext.current)
@@ -197,7 +213,7 @@ fun PicsumResultScreen(blurr: Boolean, gray: Boolean, photos: List<PicsumPhoto>,
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f) // Use available space for the image
+                .weight(3f) // Use available space for the image
         ) {
             val imageUrl = when {
                 blurr && gray -> "${randomPhoto.downloadUrl}/?blur=10&grayscale"
@@ -267,6 +283,9 @@ fun CombinedImageScreen(
             }
         })
     }
+
+    // State to store captured image URI
+    var capturedImageUri by remember { mutableStateOf<Uri?>(null) }
 
     Column(
         modifier = modifier.fillMaxSize()
@@ -358,7 +377,7 @@ fun CombinedImageScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f) // Let it take up half the screen height
+                    .weight(3f) // Let it take up half the screen height
             ) {
                 PicsumResultScreen(
                     blurr = blurr,
@@ -375,7 +394,7 @@ fun CombinedImageScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f) // Let it take up half the screen height
+                    .weight(3f) // Let it take up half the screen height
             ) {
                 ResultScreen(
                     photos = marsUiState.photos,
@@ -385,6 +404,23 @@ fun CombinedImageScreen(
             }
         }
 
+        // Display the captured image
+        capturedImageUri?.let { uri ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(3f) // Let it take up half the screen height
+            ) {
+                AsyncImage(
+                    model = uri,
+                    contentDescription = "Captured Photo",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            }
+
+        }
+
         // Buttons section
         Row(
             modifier = Modifier
@@ -392,6 +428,14 @@ fun CombinedImageScreen(
                 .padding(16.dp), // Add padding for spacing
             horizontalArrangement = Arrangement.SpaceEvenly // Space buttons evenly
         ) {
+            CameraCompose(
+                db = db,
+                onImageCaptured = { uri ->
+                    capturedImageUri = uri
+                    // Additional actions can be performed here if needed
+                }
+            )
+
             Button(onClick = { roll = true }) {
                 Text(text = "Roll")
             }
@@ -415,4 +459,90 @@ fun CombinedImageScreen(
 
 // -------------------------------------------------------------------------------------
 
+//Auxiliar function to create file name
+fun Context.createImageFile(): File {
+    // Create an image file name
+    val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
+    val imageFileName = "JPEG_" + timeStamp + "_"
+    val image = File.createTempFile(
+        imageFileName, /* prefix */
+        ".jpg", /* suffix */
+        externalCacheDir /* directory */
+    )
+    return image
+}
+
+@Composable
+fun CameraCompose(modifier: Modifier = Modifier, db: FirebaseDatabase, onImageCaptured: (Uri) -> Unit) {
+    val context = LocalContext.current
+    val file = context.createImageFile()
+    val uri = FileProvider.getUriForFile(
+        context,
+        context.packageName + ".provider", file
+    )
+    var capturedImageUri by remember { mutableStateOf<Uri>(Uri.EMPTY) }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) {
+        if (it) {
+            capturedImageUri = uri
+            onImageCaptured(uri)
+            // Log the URI to verify it
+            Log.d("CameraCompose", "URI: $uri")
+        }
+    }
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) {
+        cameraLauncher.launch(uri)
+    }
+    Button(onClick = {
+        val permissionCheckResult = ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA)
+        if (permissionCheckResult == PackageManager.PERMISSION_GRANTED) {
+            cameraLauncher.launch(uri)
+        } else {
+            permissionLauncher.launch(android.Manifest.permission.CAMERA)
+        }
+    }) {
+        Text(text = "Photo")
+    }
+}
+
+fun uploadImageToFirebase(context: Context, uri: Uri, db: FirebaseDatabase) {
+    val MESSAGES_CHILD = "camera"
+    val imagesRef = db.reference.child(MESSAGES_CHILD)
+
+    // Log the URI to verify it
+    Log.d("UploadImage", "URI: $uri")
+
+    // Step 1: Get a reference to Firebase Storage
+    val storage = FirebaseStorage.getInstance()
+    val storageRef = storage.reference.child("images/${System.currentTimeMillis()}.jpg") // Unique filename
+
+    // Step 2: Convert URI to InputStream and Upload
+    val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
+    if (inputStream == null) {
+        Log.e("UploadImage", "Input stream is null. Check the URI.")
+        return
+    }
+
+    // Upload the image to Firebase Storage
+    val uploadTask = storageRef.putStream(inputStream)
+    uploadTask.addOnSuccessListener { taskSnapshot ->
+        // Get the download URL after the upload is complete
+        storageRef.downloadUrl.addOnSuccessListener { downloadUri ->
+            // Step 3: Store the download URL in Firebase Realtime Database
+            imagesRef.push().setValue(downloadUri.toString())
+                .addOnCompleteListener { task ->
+                    if (task.isSuccessful) {
+                        Log.d("FirebaseUpload", "Image uploaded successfully and URL saved.")
+                    } else {
+                        Log.e("FirebaseUpload", "Failed to save URL: ${task.exception?.message}")
+                    }
+                }
+        }.addOnFailureListener { e ->
+            Log.e("FirebaseUpload", "Failed to get download URL: ${e.message}")
+        }
+    }.addOnFailureListener { e ->
+        Log.e("FirebaseUpload", "Upload failed: ${e.message}")
+    }
+}
 
