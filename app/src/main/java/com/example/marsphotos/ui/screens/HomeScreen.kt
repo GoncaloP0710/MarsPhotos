@@ -497,31 +497,15 @@ fun CameraCompose(modifier: Modifier = Modifier, db: FirebaseDatabase, onImageCa
             saveImageAsJpg(context, uri) // Save the image as a real file
 
             // TODO - Add image to firebase
-            // Upload the image to Firebase Storage
-            val storageReference = FirebaseStorage.getInstance().reference.child("Photos/${uri.lastPathSegment}")
 
-            storageReference.putFile(uri)
-                .addOnSuccessListener { taskSnapshot ->
-                    // Image uploaded successfully
-                    Log.d("CameraCompose", "Image uploaded successfully")
+            val imageEntry = mapOf(
+                "url" to uri.toString(),
+                "timestamp" to System.currentTimeMillis()
+            )
+            db.reference.child("photos").push().setValue(imageEntry)
+                .addOnSuccessListener { /* Handle success if needed */ }
+                .addOnFailureListener { /* Handle error if needed */ }
 
-                    // Get the download URL after successful upload
-                    storageReference.downloadUrl.addOnSuccessListener { downloadUri ->
-                        // Save the download URL in Firebase Realtime Database
-                        val imageRef = db.reference.child("Photos")
-                        imageRef.push().setValue(downloadUri.toString())
-                            .addOnSuccessListener {
-                                Log.d("CameraCompose", "Download URL saved to Realtime Database")
-                            }
-                            .addOnFailureListener { exception ->
-                                Log.e("CameraCompose", "Failed to save download URL: ${exception.message}")
-                            }
-                    }
-                }
-                .addOnFailureListener { exception ->
-                    // Handle any errors during upload
-                    Log.e("CameraCompose", "Image upload failed: ${exception.message}")
-                }
         }
     }
     val permissionLauncher = rememberLauncherForActivityResult(
